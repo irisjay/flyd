@@ -1,3 +1,11 @@
+# iris version of flyd. 
+\- unhelpful, hackily implemnted 'atomicity'  
+\- error prone api for combine  
+\+ sensible default combine api  
+\+ order of attaching listeners is preserved  
+\+ fixed transduce bugs  
+use with flydisms
+
 # Flyd
 
 The modular, KISS, functional reactive programming library for JavaScript.
