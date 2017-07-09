@@ -9,12 +9,6 @@ function isFunction(obj) {
 }
 function trueFn() { return true; }
 
-// Globals
-var toUpdate = [];
-var inStream;
-var order = [];
-var orderNextIdx = -1;
-var flushing = false;
 
 /** @namespace */
 var flyd = {}
@@ -38,7 +32,6 @@ flyd.stream = function(initialValue) {
   var endStream = createDependentStream([], trueFn);
   var s = createStream();
   s.end = endStream;
-  s.fnArgs = [];
   endStream.listeners.push(s);
   s.toJSON = function() {
     return s();
@@ -77,7 +70,6 @@ function combine(fn, streams) {
   }
   s = createDependentStream(deps, fn);
   s.depsChanged = [];
-  s.fnArgs = s.deps.concat([s, s.depsChanged]);
   s.end = endStream;
   endStream.listeners.push(s);
   addListeners(depEndStreams, endStream);
@@ -182,7 +174,7 @@ flyd.endsOn = function(endS, s) {
  */
 // Library functions use self callback to accept (null, undefined) update triggers.
 flyd.map = curryN(2, function(f, s) {
-  return combine(function(s, self) { self(f(s.val)); }, [s]);
+  return combine(function(self) { self(f(s.val)); }, [s]);
 })
 
 /**
@@ -200,68 +192,8 @@ flyd.map = curryN(2, function(f, s) {
  * @return {stream} an empty stream (can be ended)
  */
 flyd.on = curryN(2, function(f, s) {
-  return combine(function(s) { f(s.val); }, [s]);
+  return combine(function() { f(s.val); }, [s]);
 })
-
-/**
- * Creates a new stream with the results of calling the function on every incoming
- * stream with and accumulator and the incoming value.
- *
- * __Signature__: `(a -> b -> a) -> a -> Stream b -> Stream a`
- *
- * @name flyd.scan
- * @param {Function} fn - the function to call
- * @param {*} val - the initial value of the accumulator
- * @param {stream} stream - the stream source
- * @return {stream} the new stream
- *
- * @example
- * var numbers = flyd.stream();
- * var sum = flyd.scan(function(sum, n) { return sum+n; }, 0, numbers);
- * numbers(2)(3)(5);
- * sum(); // 10
- */
-flyd.scan = curryN(3, function(f, acc, s) {
-  var ns = combine(function(s, self) {
-    self(acc = f(acc, s.val));
-  }, [s]);
-  if (!ns.hasVal) ns(acc);
-  return ns;
-});
-
-/**
- * Creates a new stream down which all values from both `stream1` and `stream2`
- * will be sent.
- *
- * __Signature__: `Stream a -> Stream a -> Stream a`
- *
- * @name flyd.merge
- * @param {stream} source1 - one stream to be merged
- * @param {stream} source2 - the other stream to be merged
- * @return {stream} a stream with the values from both sources
- *
- * @example
- * var btn1Clicks = flyd.stream();
- * button1Elm.addEventListener(btn1Clicks);
- * var btn2Clicks = flyd.stream();
- * button2Elm.addEventListener(btn2Clicks);
- * var allClicks = flyd.merge(btn1Clicks, btn2Clicks);
- */
-flyd.merge = curryN(2, function(s1, s2) {
-  var s = flyd.immediate(combine(function(s1, s2, self, changed) {
-    if (changed[0]) {
-      self(changed[0]());
-    } else if (s1.hasVal) {
-      self(s1.val);
-    } else if (s2.hasVal) {
-      self(s2.val);
-    }
-  }, [s1, s2]));
-  flyd.endsOn(combine(function() {
-    return true;
-  }, [s1.end, s2.end]), s);
-  return s;
-});
 
 /**
  * Creates a new stream resulting from applying `transducer` to `stream`.
@@ -284,15 +216,19 @@ flyd.merge = curryN(2, function(s1, s2) {
  * s1(1)(1)(2)(3)(3)(3)(4);
  * results; // => [2, 4, 6, 8]
  */
+var skip = {};
+ 
 flyd.transduce = curryN(2, function(xform, source) {
   xform = xform(new StreamTransformer());
-  return combine(function(source, self) {
-    var res = xform['@@transducer/step'](undefined, source.val);
+  return combine(function(self) {
+    var res = xform['@@transducer/step'](skip, source.val);
     if (res && res['@@transducer/reduced'] === true) {
+      if (res['@@transducer/value'] !== skip) self (res['@@transducer/value']);
       self.end(true);
-      return res['@@transducer/value'];
-    } else {
-      return res;
+    }
+    else {
+      if (res !== skip)
+        self (res);
     }
   }, [source]);
 });
@@ -357,7 +293,7 @@ function boundMap(f) { return flyd.map(f, this); }
  */
 function ap(s2) {
   var s1 = this;
-  return combine(function(s1, s2, self) { self(s1.val(s2.val)); }, [s1, s2]);
+  return combine(function(self) { self(s1.val(s2.val)); }, [s1, s2]);
 }
 
 /**
@@ -409,9 +345,9 @@ function createStream() {
   s.val = undefined;
   s.vals = [];
   s.listeners = [];
-  s.queued = false;
   s.end = undefined;
   s.map = boundMap;
+  /*fluent api*/s.thru = function (func, args) { return func .apply (s, [] .concat .call (args || [], [s])); };
   s.ap = ap;
   s.of = flyd.stream;
   s.toString = streamToString;
@@ -458,76 +394,11 @@ function initialDepsNotMet(stream) {
 function updateStream(s) {
   if ((s.depsMet !== true && initialDepsNotMet(s)) ||
       (s.end !== undefined && s.end.val === true)) return;
-  if (inStream !== undefined) {
-    toUpdate.push(s);
-    return;
-  }
-  inStream = s;
-  if (s.depsChanged) s.fnArgs[s.fnArgs.length - 1] = s.depsChanged;
-  var returnVal = s.fn.apply(s.fn, s.fnArgs);
+  var returnVal = s.fn(s, s.depsChanged);
   if (returnVal !== undefined) {
     s(returnVal);
   }
-  inStream = undefined;
   if (s.depsChanged !== undefined) s.depsChanged = [];
-  s.shouldUpdate = false;
-  if (flushing === false) flushUpdate();
-}
-
-/**
- * @private
- * Update the dependencies of a stream
- * @param {stream} stream
- */
-function updateDeps(s) {
-  var i, o, list
-  var listeners = s.listeners;
-  for (i = 0; i < listeners.length; ++i) {
-    list = listeners[i];
-    if (list.end === s) {
-      endStream(list);
-    } else {
-      if (list.depsChanged !== undefined) list.depsChanged.push(s);
-      list.shouldUpdate = true;
-      findDeps(list);
-    }
-  }
-  for (; orderNextIdx >= 0; --orderNextIdx) {
-    o = order[orderNextIdx];
-    if (o.shouldUpdate === true) updateStream(o);
-    o.queued = false;
-  }
-}
-
-/**
- * @private
- * Add stream dependencies to the global `order` queue.
- * @param {stream} stream
- * @see updateDeps
- */
-function findDeps(s) {
-  var i
-  var listeners = s.listeners;
-  if (s.queued === false) {
-    s.queued = true;
-    for (i = 0; i < listeners.length; ++i) {
-      findDeps(listeners[i]);
-    }
-    order[++orderNextIdx] = s;
-  }
-}
-
-/**
- * @private
- */
-function flushUpdate() {
-  flushing = true;
-  while (toUpdate.length > 0) {
-    var s = toUpdate.shift();
-    if (s.vals.length > 0) s.val = s.vals.shift();
-    updateDeps(s);
-  }
-  flushing = false;
 }
 
 /**
@@ -537,28 +408,16 @@ function flushUpdate() {
  * @param {*} value
  */
 function updateStreamValue(s, n) {
-  if (n !== undefined && n !== null && isFunction(n.then)) {
-    n.then(s);
-    return;
-  }
   s.val = n;
   s.hasVal = true;
-  if (inStream === undefined) {
-    flushing = true;
-    updateDeps(s);
-    if (toUpdate.length > 0) flushUpdate(); else flushing = false;
-  } else if (inStream === s) {
-    markListeners(s, s.listeners);
-  } else {
-    s.vals.push(n);
-    toUpdate.push(s);
-  }
+  markListeners(s, s.listeners);
 }
 
 /**
  * @private
  */
 function markListeners(s, lists) {
+  lists = lists .slice (0); //DON'T REMOVE! preserve listeners for this loop, so no higher order effects occur
   var i, list;
   for (i = 0; i < lists.length; ++i) {
     list = lists[i];
@@ -566,7 +425,14 @@ function markListeners(s, lists) {
       if (list.depsChanged !== undefined) {
         list.depsChanged.push(s);
       }
-      list.shouldUpdate = true;
+      try {
+        updateStream(list)
+      }
+      catch (e) {
+        setTimeout (function () {
+          throw e;
+        }, 0);
+      }
     } else {
       endStream(list);
     }
