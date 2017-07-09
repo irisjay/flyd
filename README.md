@@ -1,8 +1,10 @@
 # iris version of flyd. 
 \- unhelpful, hackily implemnted 'atomicity'  
 \- error prone api for combine  
+\- unessential stream functions  
 \+ sensible default combine api  
 \+ order of attaching listeners is preserved  
+\+ fluent most-style 'thru' api  
 \+ fixed transduce bugs  
 use with flydisms
 
